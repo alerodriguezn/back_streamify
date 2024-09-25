@@ -1,3 +1,4 @@
+import cors from 'cors';
 import express from 'express';
 import type { Request, Response } from 'express';
 require('dotenv').config();
@@ -7,34 +8,54 @@ import { BlobServiceClient } from '@azure/storage-blob';
 const app = express();
 const port = 5000;
 
+app.use(cors(
+  {
+    origin: '*',
+    methods: 'GET',
+    allowedHeaders: 'Content-Type, Range',
+  }
+));
+
 // Conexión a Azure Blob Storage
-const AZURE_STORAGE_CONNECTION_STRING = process.env.AZURE_STORAGE!; ;
+const AZURE_STORAGE_CONNECTION_STRING = process.env.AZURE_STORAGE!;
 const blobServiceClient = BlobServiceClient.fromConnectionString(AZURE_STORAGE_CONNECTION_STRING);
 const containerName = 'blobmultimedia';
 
-
-app.get('/stream/', async (req: Request, res: Response) => {
+app.get('/stream/:blobName', async (req: Request, res: Response) => {
   try {
-    const blobName = 'mp4video.mp4';
+
+    const blobName = req.params.blobName; 
     const containerClient = blobServiceClient.getContainerClient(containerName);
     const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
     const downloadBlockBlobResponse = await blockBlobClient.download(0);
-
-    res.setHeader('Content-Type', 'video/mp4');
-
+    const contentLength = downloadBlockBlobResponse.contentLength!;
 
     const range = req.headers.range;
     if (range) {
-      const start = parseInt(range.replace(/bytes=/, ""), 10);
-      const end = Math.min(start + 1024 * 1024 - 1, downloadBlockBlobResponse.contentLength! - 1); // 1 MB chunks
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${downloadBlockBlobResponse.contentLength}`);
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : contentLength - 1;
+
+
+      if (start >= contentLength || end >= contentLength) {
+        res.status(416).setHeader('Content-Range', `bytes */${contentLength}`);
+        return res.end();
+      }
+
+      const chunkSize = (end - start) + 1;
+      res.status(206).setHeader('Content-Range', `bytes ${start}-${end}/${contentLength}`);
       res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Content-Length', end - start + 1);
-      res.status(206);
-      downloadBlockBlobResponse.readableStreamBody?.pipe(res);
+      res.setHeader('Content-Length', chunkSize);
+      res.setHeader('Content-Type', 'video/mp4');
+
+      // Descargar la parte solicitada del blob
+      const partialDownloadResponse = await blockBlobClient.download(start, chunkSize);
+      partialDownloadResponse.readableStreamBody?.pipe(res);
     } else {
-      res.setHeader('Content-Length', downloadBlockBlobResponse.contentLength ?? 0);
+      // Si no hay encabezado Range, transmitir el archivo completo
+      res.setHeader('Content-Length', contentLength);
+      res.setHeader('Content-Type', 'video/mp4');
       downloadBlockBlobResponse.readableStreamBody?.pipe(res);
     }
   } catch (error) {
